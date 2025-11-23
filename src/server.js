@@ -165,7 +165,34 @@ io.on('connection', socket => {
             return;
         }
 
-        // Проверяет лимит
+        const prevChannelId = socketChannelMap.get(socket.id);
+
+        // Если уже числимся в этом же канале
+        if (prevChannelId === channelId) {
+            let members = channelMembers.get(channelId);
+            if (!members) {
+                members = new Map();
+                channelMembers.set(channelId, members);
+            }
+
+            const effectiveMaxUsers = channel.maxUsers || config.maxRoomUsers;
+
+            const others = [];
+            members.forEach(m => {
+                if (m.socketId !== socket.id) {
+                    others.push({ socketId: m.socketId, name: m.name });
+                }
+            });
+
+            socket.emit('room-users', {
+                roomId: channelId,
+                users: others,
+                maxUsers: effectiveMaxUsers
+            });
+
+            return;
+        }
+
         let members = channelMembers.get(channelId);
         if (!members) {
             members = new Map();
@@ -173,12 +200,14 @@ io.on('connection', socket => {
         }
 
         const effectiveMaxUsers = channel.maxUsers || config.maxRoomUsers;
+
+        // Лимит: так как prevChannelId !== channelId
         if (members.size >= effectiveMaxUsers) {
             socket.emit('join-error', { code: 'ROOM_FULL' });
             return;
         }
 
-        // Проверяет пароль
+        // Проверка пароля
         if (channel.hasPassword) {
             const provided = password ? String(password) : '';
             if (!provided || provided !== (channel.passwordHash || '')) {
@@ -187,7 +216,27 @@ io.on('connection', socket => {
             }
         }
 
-        // Присоединяем к socket.io комнате
+        // 1) Удалить из предыдущего канала, если был
+        if (prevChannelId) {
+            const prevMembers = channelMembers.get(prevChannelId);
+
+            if (prevMembers && prevMembers.has(socket.id)) {
+                prevMembers.delete(socket.id);
+
+                // уведомить старую комнату
+                socket.to(prevChannelId).emit('user-left', {
+                    socketId: socket.id
+                });
+
+                if (prevMembers.size === 0) {
+                    channelMembers.delete(prevChannelId);
+                }
+            }
+
+            socket.leave(prevChannelId);
+        }
+
+        // 2) Добавляем в новую комнату
         socket.join(channelId);
 
         const member = {
@@ -199,7 +248,6 @@ io.on('connection', socket => {
         members.set(socket.id, member);
         socketChannelMap.set(socket.id, channelId);
 
-        // Формируем список остальных в канале
         const others = [];
         members.forEach(m => {
             if (m.socketId !== socket.id) {
@@ -213,12 +261,12 @@ io.on('connection', socket => {
             maxUsers: effectiveMaxUsers
         });
 
-        // Оповестить остальных в канале
         socket.to(channelId).emit('user-joined', {
             socketId: socket.id,
             name: member.name
         });
 
+        // Обновляем presence во всех списках каналов
         broadcastChannelsState();
     });
 
